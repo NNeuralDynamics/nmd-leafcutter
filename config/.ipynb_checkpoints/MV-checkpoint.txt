@@ -1,0 +1,6 @@
+/scratch/thakur.san/castaldi/proj/nmd/data/rnaseq/bam/PS_STC1505_5_MV001VSmg1i_S5_L001.markdup.sorted.bam	Smg1i
+/scratch/thakur.san/castaldi/proj/nmd/data/rnaseq/bam/PS_STC1505_1_MV027USmg1i_S1_L001.markdup.sorted.bam	Smg1i
+/scratch/thakur.san/castaldi/proj/nmd/data/rnaseq/bam/PS_STC1505_9_MV029TSmg1i_S9_L001.markdup.sorted.bam	Smg1i
+/scratch/thakur.san/castaldi/proj/nmd/data/rnaseq/bam/PS_STC1505_6_MV001VDMSO_S6_L001.markdup.sorted.bam	DMSO
+/scratch/thakur.san/castaldi/proj/nmd/data/rnaseq/bam/PS_STC1505_2_MV027UDMSO_S2_L001.markdup.sorted.bam	DMSO
+/scratch/thakur.san/castaldi/proj/nmd/data/rnaseq/bam/PS_STC1505_10_MV029TDMSO_S10_L001.markdup.sorted.bam	DMSO
