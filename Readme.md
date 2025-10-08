@@ -33,6 +33,8 @@ This repository is designed to facilitate the analysis of Nonsense-Mediated Deca
 ### Requirements:
 * R v4.2.3
 * conda
+* samtools
+* regtools
 
 ### Installation
 __1. Clone the repository__ 
@@ -110,3 +112,8 @@ The file should be tab-delimited, not space-delimited.
 File paths must be absolute, not relative.
 
 Ensure BAM files are sorted and indexed (each should have a corresponding .bam.bai file).
+
+### Output files
+the differential splicing analysis results are stored in two files
+1. ```results/cell_type/cell_type_cluster_significance.txt```
+2. ```results/cell_type/cell_type_effect_sizes.txt```
