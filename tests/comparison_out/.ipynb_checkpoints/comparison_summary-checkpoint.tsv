@@ -1,0 +1,5 @@
+cell_type	tested_old	tested_new	matched_tested_both	sig_old	sig_new	sig_both	gained_with_donor	lost_with_donor	spearman_log10p	pearson_deltapsi	same_direction_sig
+AT2	38043	38043	38043	11503	15358	11127	4231	376	0.903	0.931	0.833
+DD	45502	45501	45501	21386	25958	20626	5332	759	0.91	0.912	0.845
+FB	34696	34696	34696	8000	13721	7698	6023	302	0.843	0.904	0.823
+MV	33789	33789	33789	12265	16683	11760	4923	505	0.877	0.91	0.814

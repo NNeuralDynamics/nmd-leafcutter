@@ -1,0 +1,445 @@
+---
+title: "LeafCutter Pipeline Audit Report"
+subtitle: "NMD Differential Splicing: Smg1i vs. DMSO, donor-adjusted"
+author: "Sanika Thakur"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+params:
+  results_dir: "/scratch/thakur.san/nmd-leafcutter/leafcutter_donor_results_v1"
+  cell_types: !r c("AT2", "DD", "FB", "MV")
+  fdr: 0.05
+  min_dpsi: 0.1
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 5)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(scales)
+library(data.table)
+
+theme_set(theme_bw(base_size = 12))
+
+results_dir <- params$results_dir
+cell_types  <- params$cell_types
+cond_colors <- c(DMSO = "#8491B4", Smg1i = "#DC0000")
+ct_colors   <- setNames(c("#E64B35", "#4DBBD5", "#00A087", "#3C5488",
+                          "#F39B7F", "#7E6148")[seq_along(cell_types)], cell_types)
+
+ct_file <- function(ct, suffix) file.path(results_dir, ct, paste0(ct, suffix))
+
+read_samples <- function(ct) {
+  s <- fread(file.path(results_dir, ct, "samples.tsv"), header = FALSE, sep = "\t")
+  setnames(s, c("sample", "condition", "donor")[seq_len(ncol(s))])
+  if (!"donor" %in% names(s)) s[, donor := NA_character_]
+  s[, cell_type := ct]
+  s[]
+}
+
+# junction_files.txt holds cluster paths; fall back to the copy inside results_dir
+junc_paths <- function(ct) {
+  p <- readLines(file.path(results_dir, ct, "junction_files.txt"))
+  p <- p[nzchar(p)]
+  local <- file.path(results_dir, ct, "junction_files", basename(p))
+  ifelse(file.exists(p), p, local)
+}
+
+# regtools .junc is BED12; the intron sits between the two anchor blocks
+read_junc <- function(f) {
+  d <- fread(f, header = FALSE, sep = "\t", select = c(1, 2, 3, 11),
+             col.names = c("chr", "start", "end", "bsize"))
+  bs <- tstrsplit(d$bsize, ",", fixed = TRUE)
+  d[, .(chr, i_start = start + as.integer(bs[[1]]), i_end = end - as.integer(bs[[2]]))]
+}
+
+read_count_ids <- function(ct) {
+  con <- gzfile(ct_file(ct, "_perind_numers.counts.gz"))
+  on.exit(close(con))
+  lines <- readLines(con)
+  list(n_samples = length(strsplit(lines[1], " ")[[1]]) - 1,
+       ids = sub(" .*", "", lines[-1]))
+}
+```
+
+# Pipeline Parameters
+
+```{r params-table}
+data.frame(
+  Stage = c("regtools", "regtools", "regtools", "regtools",
+            "Clustering", "Clustering",
+            "DS", "DS", "DS", "DS", "DS"),
+  Parameter = c("-a (anchor)", "-m (min intron)", "-M (max intron)", "-s (strand)",
+                "-m (min reads)", "-l (max intron)",
+                "Model", "Covariate", "-i (min samples per intron)",
+                "-g (min samples per group)", "-c (min coverage)"),
+  Value = c("6", "10", "1,000,000", "RF",
+            "10", "1,000,000",
+            "Dirichlet-multinomial GLM", "donor", "3", "3", "20"),
+  Description = c("Min bases on each side of junction", "Min intron length",
+                  "Max intron length", "fr-firststrand library",
+                  "Min reads supporting a cluster", "Max intron length",
+                  "Smg1i vs DMSO", "Paired design: each donor has a DMSO and a Smg1i sample",
+                  "Intron must be seen in at least 3 samples",
+                  "At least 3 samples per group must pass coverage",
+                  "Min reads per cluster in a sample")
+) %>%
+  kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  collapse_rows(columns = 1, valign = "top")
+```
+
+**Internal hardcoded filters** in `leafcutter_cluster_regtools.py`:
+
+- Junction must have ≥3 reads in at least one sample
+- Singleton clusters (1 intron) are removed
+- `refine_cluster` recursively splits clusters based on min ratio
+
+**Annotation**: Gencode v45 primary assembly
+**Reads**: Paired-end, 150bp, fr-firststrand
+
+# Overview
+
+This report follows the data through the LeafCutter differential splicing pipeline for four cell types (**`r paste(cell_types, collapse = ", ")`**), comparing **Smg1i** (NMD inhibition) with **DMSO** (control). Compared with the earlier run, the differential splicing model now includes **donor** as a covariate, because every donor contributes one DMSO and one Smg1i sample.
+
+**Pipeline stages:**
+
+1. **BAM → Junctions**: `regtools junctions extract` writes one `.junc` file per sample
+2. **Junctions → Clustering**: `leafcutter_cluster_regtools.py` groups junctions into intron clusters
+3. **Clustering → Differential Splicing**: `leafcutter_ds.R` tests for differential intron usage, with `~ treatment + donor`
+
+**Sign convention.** LeafCutter uses the first group in `samples.tsv` as the reference. Here that is Smg1i, so the raw `deltapsi` column is DMSO − Smg1i. Every ΔPSI shown in this report is recomputed as **Smg1i − DMSO**, so a positive value means the intron is used more when NMD is blocked.
+
+# Sample Design
+
+```{r samples}
+samples_df <- rbindlist(lapply(cell_types, read_samples))
+
+samples_df %>%
+  select(cell_type, sample, condition, donor) %>%
+  arrange(cell_type, donor, condition) %>%
+  kable(col.names = c("Cell Type", "Sample", "Condition", "Donor"),
+        caption = "Samples and donors used in each cell type") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  collapse_rows(columns = 1, valign = "top")
+```
+
+# Stage 1: BAM → Junction Extraction (regtools)
+
+```{r read-junctions}
+junc_df  <- list()
+track_df <- list()
+clust_df <- list()
+
+for (ct in cell_types) {
+  # counts file (clustering output) for this cell type
+  cnt <- read_count_ids(ct)
+  parts <- tstrsplit(cnt$ids, ":", fixed = TRUE)
+  count_coords <- unique(paste(parts[[1]], parts[[2]], parts[[3]], sep = ":"))
+  clusters <- paste(parts[[1]], parts[[4]], sep = ":")
+  per_cluster <- table(clusters)
+
+  clust_df[[ct]] <- data.frame(
+    cell_type = ct, n_samples = cnt$n_samples, n_introns = length(cnt$ids),
+    n_clusters = length(per_cluster),
+    introns_per_cluster_median = median(as.integer(per_cluster)),
+    introns_per_cluster_max = max(per_cluster))
+
+  # per-sample junction files
+  smp <- read_samples(ct)
+  pooled <- list()
+  for (f in junc_paths(ct)) {
+    nm <- sub("\\.junc$", "", basename(f))
+    j <- read_junc(f)
+    pooled[[nm]] <- j
+    junc_df[[paste(ct, nm)]] <- data.frame(
+      cell_type = ct, sample = nm,
+      condition = smp$condition[match(nm, smp$sample)],
+      donor = smp$donor[match(nm, smp$sample)],
+      n_junctions = nrow(j))
+  }
+  pooled_u <- unique(rbindlist(pooled))
+  rm(pooled)
+
+  # LeafCutter may shift intron ends by one base; use whichever offset matches its coordinates
+  offsets <- expand.grid(ds = 0:1, de = 0:1)
+  rates <- apply(offsets, 1, function(o)
+    mean(count_coords %in% paste(pooled_u$chr, pooled_u$i_start + o[1],
+                                 pooled_u$i_end + o[2], sep = ":")))
+  best <- offsets[which.max(rates), ]
+  junc_coords <- unique(paste(pooled_u$chr, pooled_u$i_start + best$ds,
+                              pooled_u$i_end + best$de, sep = ":"))
+
+  track_df[[ct]] <- data.frame(
+    cell_type = ct,
+    total_junctions_all_samples = sum(sapply(junc_df[startsWith(names(junc_df), paste0(ct, " "))],
+                                             `[[`, "n_junctions")),
+    unique_junctions_input = length(junc_coords),
+    unique_introns_after = length(cnt$ids),
+    clusters_formed = length(per_cluster),
+    introns_used_in_clusters = length(count_coords),
+    introns_excluded = length(junc_coords) - length(count_coords),
+    pct_clustered_found_in_junc = round(100 * max(rates), 2))
+}
+
+junc_df  <- bind_rows(junc_df)
+track_df <- bind_rows(track_df)
+clust_df <- bind_rows(clust_df)
+```
+
+## Per-Sample Junction Counts
+
+```{r junc-table}
+junc_df %>%
+  arrange(cell_type, donor, condition) %>%
+  mutate(n_junctions = comma(n_junctions)) %>%
+  select(cell_type, sample, condition, donor, n_junctions) %>%
+  kable(col.names = c("Cell Type", "Sample", "Condition", "Donor", "Junctions"),
+        caption = "Junctions per sample from regtools") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  collapse_rows(columns = 1, valign = "top")
+```
+
+## Summary by Cell Type
+
+```{r junc-summary}
+junc_df %>%
+  group_by(cell_type) %>%
+  summarise(n_samples = n(), total = sum(n_junctions),
+            mean = mean(n_junctions), min = min(n_junctions), max = max(n_junctions),
+            .groups = "drop") %>%
+  mutate(across(total:max, comma)) %>%
+  kable(caption = "Junction count summary per cell type") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+```{r junc-plot}
+ggplot(junc_df, aes(x = reorder(sample, -n_junctions), y = n_junctions, fill = condition)) +
+  geom_col() +
+  facet_wrap(~cell_type, scales = "free_x") +
+  scale_fill_manual(values = cond_colors) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Junctions per sample (regtools)", x = NULL, y = "Junctions", fill = "Condition") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
+```
+
+## Paired Comparison: Smg1i vs DMSO Within Donor
+
+Each line joins the two samples from one donor. Smg1i samples usually have more junctions, because transcripts that NMD would normally degrade survive and add new splice junctions.
+
+```{r junc-paired, fig.height = 4.5}
+junc_df %>%
+  filter(!is.na(donor)) %>%
+  mutate(condition = factor(condition, levels = c("DMSO", "Smg1i"))) %>%
+  ggplot(aes(x = condition, y = n_junctions, group = donor)) +
+  geom_line(colour = "grey60") +
+  geom_point(aes(colour = condition), size = 2.5) +
+  facet_wrap(~cell_type, nrow = 1) +
+  scale_colour_manual(values = cond_colors) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Junctions per sample, paired by donor", x = NULL, y = "Junctions") +
+  theme(legend.position = "none")
+```
+
+# Stage 2: Junction → Clustering (LeafCutter)
+
+## Clustering Summary
+
+```{r clust-table}
+clust_df %>%
+  mutate(across(c(n_introns, n_clusters), comma)) %>%
+  kable(caption = "Post-clustering: introns and clusters per cell type") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+```{r clust-plot}
+clust_df %>%
+  select(cell_type, n_introns, n_clusters) %>%
+  pivot_longer(-cell_type, names_to = "metric", values_to = "count") %>%
+  mutate(metric = recode(metric, n_introns = "Introns", n_clusters = "Clusters")) %>%
+  ggplot(aes(x = cell_type, y = count, fill = cell_type)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~metric, scales = "free_y") +
+  scale_fill_manual(values = ct_colors) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Introns and clusters per cell type", x = NULL, y = "Count")
+```
+
+# Stage 1 → 2: Junction-to-Cluster Tracking
+
+```{r track-table}
+track_df %>%
+  mutate(across(total_junctions_all_samples:introns_excluded, comma)) %>%
+  kable(col.names = c("Cell Type", "Total Junc (all samples)", "Unique Junc Input",
+                      "Unique Introns After", "Clusters Formed",
+                      "Introns Used in Clusters", "Introns Excluded",
+                      "% Clustered Introns Found in .junc"),
+        caption = "Full junction-to-cluster tracking") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+### Column Definitions
+
+**Total Junc (all samples):** every junction line across all `.junc` files for the cell type. A junction seen in 6 samples counts 6 times, so this reflects the total splicing evidence across the BAMs.
+
+**Unique Junc Input:** distinct intron coordinates (`chr:start:end`) pooled across samples. This is what goes into LeafCutter clustering. Intron coordinates are taken from the BED12 anchor blocks, so the same intron gets the same coordinates in every sample even when the anchor lengths differ.
+
+**Unique Introns After:** rows in `_perind_numers.counts.gz`. This can be slightly higher than *Introns Used in Clusters*, because one coordinate can appear in two clusters (for example on opposite strands) and each copy is its own row.
+
+**Clusters Formed:** distinct `clu_XXXX` identifiers in the counts file. Each cluster is a group of two or more introns sharing a splice site.
+
+**Introns Used in Clusters:** distinct `chr:start:end` coordinates in at least one cluster, counted once each.
+
+**Introns Excluded:** *Unique Junc Input* minus *Introns Used in Clusters*. These are junctions regtools found but LeafCutter dropped because they had fewer than 3 reads in every sample, did not share a splice site with any other junction, or were removed by `refine_cluster`.
+
+**% Clustered Introns Found in .junc:** a sanity check. Nearly every clustered intron should be traceable to the `.junc` files, so this should be close to 100%.
+
+```{r track-plot}
+track_df %>%
+  select(cell_type, unique_junctions_input, introns_used_in_clusters) %>%
+  pivot_longer(-cell_type, names_to = "stage", values_to = "count") %>%
+  mutate(stage = recode(stage,
+    unique_junctions_input   = "regtools (input)",
+    introns_used_in_clusters = "Clustered (retained)")) %>%
+  ggplot(aes(x = cell_type, y = count, fill = stage)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("regtools (input)" = "#B3B3B3", "Clustered (retained)" = "#4DBBD5")) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Unique junctions: input vs. retained after clustering",
+       x = NULL, y = "Unique junction coordinates", fill = NULL)
+```
+
+# Stage 3: Clustering → Differential Splicing
+
+```{r load-ds}
+load_ds <- function(ct) {
+  sig <- fread(ct_file(ct, "_cluster_significance.txt"))
+  setnames(sig, "p.adjust", "padj")
+  eff <- fread(ct_file(ct, "_effect_sizes.txt"))
+  has_groups <- all(c("Smg1i", "DMSO") %in% names(eff))
+  if (has_groups) eff[, dpsi := Smg1i - DMSO] else eff[, dpsi := -deltapsi]
+  parts <- tstrsplit(eff$intron, ":", fixed = TRUE)
+  eff[, cluster := paste(parts[[1]], parts[[4]], sep = ":")]
+  top <- eff[eff[, .I[which.max(abs(dpsi))], by = cluster]$V1,
+             .(cluster, top_intron = intron, max_dpsi = dpsi)]
+  sig <- merge(sig, top, by = "cluster", all.x = TRUE)
+  list(sig = sig, eff = eff, has_groups = has_groups)
+}
+
+ds <- setNames(lapply(cell_types, load_ds), cell_types)
+```
+
+## Sign Check
+
+```{r sign-check}
+lapply(cell_types, function(ct) {
+  e <- ds[[ct]]$eff
+  if (!ds[[ct]]$has_groups) {
+    return(data.frame(cell_type = ct, raw_deltapsi = "group columns missing, assumed DMSO − Smg1i",
+                      cor_with_DMSO_minus_Smg1i = NA))
+  }
+  r <- cor(e$deltapsi, e$DMSO - e$Smg1i, use = "complete.obs")
+  data.frame(cell_type = ct,
+             raw_deltapsi = ifelse(r > 0.99, "DMSO − Smg1i", ifelse(r < -0.99, "Smg1i − DMSO", "unclear")),
+             cor_with_DMSO_minus_Smg1i = round(r, 4))
+}) %>%
+  bind_rows() %>%
+  kable(col.names = c("Cell Type", "Raw deltapsi column is", "cor(deltapsi, DMSO − Smg1i)"),
+        caption = "Direction of LeafCutter's deltapsi column. All values below use Smg1i − DMSO.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Cluster Status
+
+```{r status}
+status_df <- bind_rows(lapply(cell_types, function(ct)
+  ds[[ct]]$sig[, .N, by = status][, cell_type := ct]))
+
+status_df %>%
+  pivot_wider(names_from = cell_type, values_from = N, values_fill = 0) %>%
+  arrange(desc(.data[[cell_types[1]]])) %>%
+  kable(caption = "LeafCutter status of every cluster, per cell type") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+```{r status-plot, fig.height = 4.5}
+ggplot(status_df, aes(x = cell_type, y = N, fill = status)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = percent) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Share of clusters by LeafCutter status", x = NULL, y = "Clusters", fill = NULL) +
+  theme(legend.position = "bottom", legend.text = element_text(size = 8)) +
+  guides(fill = guide_legend(ncol = 2))
+```
+
+Clusters marked *Not enough valid samples* or *coverage* failed LeafCutter's coverage filters: with 3 donors per group, all three samples in each group need at least 20 reads in the cluster.
+
+## DS Summary
+
+```{r ds-summary}
+ds_df <- bind_rows(lapply(cell_types, function(ct) {
+  s <- ds[[ct]]$sig
+  hits <- s[status == "Success" & padj < params$fdr]
+  strong <- hits[abs(max_dpsi) >= params$min_dpsi]
+  data.frame(cell_type = ct,
+             n_introns = nrow(ds[[ct]]$eff),
+             clusters_total = nrow(s),
+             clusters_tested = sum(s$status == "Success"),
+             sig = nrow(hits),
+             sig_strong = nrow(strong),
+             up_smg1i = sum(strong$max_dpsi > 0),
+             down_smg1i = sum(strong$max_dpsi < 0))
+}))
+
+ds_df %>%
+  mutate(across(n_introns:down_smg1i, comma)) %>%
+  kable(col.names = c("Cell Type", "Introns Tested", "Clusters", "Clusters Tested",
+                      paste0("Sig (p.adj < ", params$fdr, ")"),
+                      paste0("Sig and |ΔPSI| ≥ ", params$min_dpsi),
+                      "Up in Smg1i", "Down in Smg1i"),
+        caption = "Differential splicing summary per cell type. Up/Down use the cluster's largest-effect intron.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  add_header_above(c(" " = 6, "Direction (strong hits)" = 2))
+```
+
+```{r ds-plot}
+ds_df %>%
+  select(cell_type, sig, sig_strong) %>%
+  pivot_longer(-cell_type, names_to = "set", values_to = "n") %>%
+  mutate(set = recode(set, sig = paste0("p.adj < ", params$fdr),
+                      sig_strong = paste0("p.adj < ", params$fdr, " and |ΔPSI| ≥ ", params$min_dpsi))) %>%
+  ggplot(aes(x = cell_type, y = n, fill = set)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = comma(n)), position = position_dodge(width = 0.9), vjust = -0.4, size = 3.2) +
+  scale_fill_manual(values = c("#B3B3B3", "#DC0000")) +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.08))) +
+  labs(title = "Significant differentially spliced clusters", x = NULL, y = "Clusters", fill = NULL) +
+  theme(legend.position = "bottom")
+```
+
+## P-value Distributions
+
+A spike near 0 on a flat background is the expected shape. A bump near 1 or a U shape would suggest a problem with the model or the groups.
+
+```{r pval-hist, fig.height = 4}
+bind_rows(lapply(cell_types, function(ct)
+  ds[[ct]]$sig[status == "Success", .(cell_type = ct, p)])) %>%
+  ggplot(aes(x = p, fill = cell_type)) +
+  geom_histogram(breaks = seq(0, 1, 0.025), show.legend = FALSE) +
+  facet_wrap(~cell_type, nrow = 1) +
+  scale_fill_manual(values = ct_colors) +
+  labs(title = "Cluster p-values (tested clusters only)", x = "p", y = "Clusters")
+```
+
+# Session Info
+
+```{r session}
+sessionInfo()
+```

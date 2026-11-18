@@ -1,0 +1,289 @@
+---
+title: "LeafCutter Top 100 Significant Genes"
+subtitle: "NMD Differential Splicing: Smg1i vs. DMSO, donor-adjusted"
+author: "Sanika Thakur"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+params:
+  results_dir: "/scratch/thakur.san/nmd-leafcutter/leafcutter_donor_results_v1"
+  cell_types: !r c("AT2", "DD", "FB", "MV")
+  fdr: 0.05
+  min_dpsi: 0.1
+  n_top: 100
+  out_dir: "top100_tables"
+  control_genes: !r c("SRSF2", "SRSF3", "SRSF6", "SRSF7", "HNRNPDL", "TRA2B")
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 5)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(scales)
+library(data.table)
+
+theme_set(theme_bw(base_size = 12))
+
+results_dir <- params$results_dir
+cell_types  <- params$cell_types
+n_top       <- params$n_top
+ct_colors   <- setNames(c("#E64B35", "#4DBBD5", "#00A087", "#3C5488",
+                          "#F39B7F", "#7E6148")[seq_along(cell_types)], cell_types)
+dir_colors  <- c("Up in Smg1i" = "#DC0000", "Down in Smg1i" = "#3C5488")
+has_repel   <- requireNamespace("ggrepel", quietly = TRUE)
+
+dir.create(params$out_dir, showWarnings = FALSE, recursive = TRUE)
+
+ct_file <- function(ct, suffix) file.path(results_dir, ct, paste0(ct, suffix))
+fmt_p   <- function(x) formatC(x, format = "e", digits = 2)
+```
+
+# Overview
+
+This report lists the top `r n_top` differentially spliced genes in each cell type (**`r paste(cell_types, collapse = ", ")`**) from the donor-adjusted LeafCutter run, and compares them across cell types.
+
+**How genes are ranked**
+
+- A cluster is a hit if LeafCutter tested it successfully, its adjusted p-value is below **`r params$fdr`**, and its largest-effect intron has **|ΔPSI| ≥ `r params$min_dpsi`**.
+- Clusters LeafCutter could not assign to a gene are left out of the gene ranking.
+- When a gene has several significant clusters, the gene is represented by its best cluster (smallest adjusted p-value, then largest |ΔPSI|). The number of significant clusters per gene is shown alongside.
+- Genes are ranked by adjusted p-value, with |ΔPSI| breaking ties.
+
+**Sign convention.** ΔPSI is shown as **Smg1i − DMSO**. A positive value means the intron is used more when NMD is blocked, which marks the isoforms NMD normally degrades. LeafCutter's own `deltapsi` column in these runs is DMSO − Smg1i, so it is recomputed here from the per-group PSI columns.
+
+The full tables are also saved as CSV files in ``r params$out_dir``.
+
+```{r load}
+load_ds <- function(ct) {
+  sig <- fread(ct_file(ct, "_cluster_significance.txt"))
+  setnames(sig, "p.adjust", "padj")
+  eff <- fread(ct_file(ct, "_effect_sizes.txt"))
+  if (all(c("Smg1i", "DMSO") %in% names(eff))) eff[, dpsi := Smg1i - DMSO] else eff[, dpsi := -deltapsi]
+  parts <- tstrsplit(eff$intron, ":", fixed = TRUE)
+  eff[, cluster := paste(parts[[1]], parts[[4]], sep = ":")]
+  top <- eff[eff[, .I[which.max(abs(dpsi))], by = cluster]$V1,
+             .(cluster, top_intron = intron, max_dpsi = dpsi)]
+  sig <- merge(sig, top, by = "cluster", all.x = TRUE)
+  sig[, genes := fifelse(is.na(genes) | genes %in% c("", ".", "NA"), NA_character_, genes)]
+  sig[status == "Success"][]
+}
+
+# best cluster per gene; `hits_only` limits to significant clusters
+gene_level <- function(s, hits_only) {
+  if (hits_only) s <- s[padj < params$fdr & abs(max_dpsi) >= params$min_dpsi]
+  s <- s[!is.na(genes)][order(padj, -abs(max_dpsi))]
+  s[, .(cluster = cluster[1], top_intron = top_intron[1], padj = padj[1],
+        max_dpsi = max_dpsi[1], n_clusters = .N), by = genes]
+}
+
+tested <- setNames(lapply(cell_types, load_ds), cell_types)
+
+top_tabs <- lapply(cell_types, function(ct) {
+  g <- gene_level(tested[[ct]], hits_only = TRUE)[order(padj, -abs(max_dpsi))]
+  g <- head(g, n_top)
+  g[, `:=`(rank = .I, cell_type = ct,
+           direction = ifelse(max_dpsi > 0, "Up in Smg1i", "Down in Smg1i"))]
+  g[]
+})
+names(top_tabs) <- cell_types
+
+# every tested gene, for looking up values outside the top lists
+all_genes <- setNames(lapply(cell_types, function(ct) gene_level(tested[[ct]], hits_only = FALSE)),
+                      cell_types)
+
+for (ct in cell_types) {
+  fwrite(top_tabs[[ct]][, .(rank, gene = genes, cluster, top_intron, padj, dpsi_smg1i_minus_dmso = max_dpsi,
+                            direction, n_sig_clusters = n_clusters)],
+         file.path(params$out_dir, paste0(ct, "_top", n_top, "_genes.csv")))
+}
+fwrite(rbindlist(top_tabs)[, .(cell_type, rank, gene = genes, cluster, top_intron, padj,
+                               dpsi_smg1i_minus_dmso = max_dpsi, direction, n_sig_clusters = n_clusters)],
+       file.path(params$out_dir, paste0("all_celltypes_top", n_top, "_genes.csv")))
+```
+
+# Summary
+
+```{r summary}
+bind_rows(lapply(cell_types, function(ct) {
+  s <- tested[[ct]]
+  h <- s[padj < params$fdr & abs(max_dpsi) >= params$min_dpsi]
+  t <- top_tabs[[ct]]
+  data.frame(cell_type = ct,
+             tested = nrow(s),
+             hit_clusters = nrow(h),
+             hit_clusters_with_gene = sum(!is.na(h$genes)),
+             hit_genes = uniqueN(h$genes[!is.na(h$genes)]),
+             top_up = sum(t$direction == "Up in Smg1i"),
+             top_down = sum(t$direction == "Down in Smg1i"),
+             top_padj_cutoff = fmt_p(max(t$padj)),
+             top_min_abs_dpsi = round(min(abs(t$max_dpsi)), 3))
+})) %>%
+  mutate(across(tested:hit_genes, comma)) %>%
+  kable(col.names = c("Cell Type", "Clusters Tested", "Hit Clusters", "Hit Clusters With Gene",
+                      "Hit Genes", "Up in Smg1i", "Down in Smg1i",
+                      "Largest p.adj in Top List", "Smallest |ΔPSI| in Top List"),
+        caption = paste0("Hits use p.adj < ", params$fdr, " and |ΔPSI| ≥ ", params$min_dpsi,
+                         ". Direction columns describe the top ", n_top, " genes.")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  add_header_above(c(" " = 5, "Top genes" = 4))
+```
+
+# Top `r n_top` Genes per Cell Type {.tabset}
+
+```{r per-ct, results = "asis", fig.width = 9, fig.height = 6}
+for (ct in cell_types) {
+  cat("\n\n## ", ct, "\n\n", sep = "")
+
+  s <- copy(tested[[ct]])
+  top_genes <- top_tabs[[ct]]
+  s[, category := "Not significant"]
+  s[padj < params$fdr & abs(max_dpsi) >= params$min_dpsi, category := "Significant"]
+  s[cluster %in% top_genes$cluster, category := paste("Top", n_top)]
+  s[, category := factor(category, levels = c("Not significant", "Significant", paste("Top", n_top)))]
+  s[, y := -log10(pmax(padj, 1e-300))]
+
+  lab <- merge(head(top_genes, 15)[, .(cluster, label = sub(",.*", "", genes))],
+               s[, .(cluster, max_dpsi, y)], by = "cluster")
+
+  p <- ggplot(s, aes(x = max_dpsi, y = y, colour = category)) +
+    geom_point(size = 0.9, alpha = 0.6) +
+    geom_vline(xintercept = c(-params$min_dpsi, params$min_dpsi), linetype = "dashed", colour = "grey50") +
+    geom_hline(yintercept = -log10(params$fdr), linetype = "dashed", colour = "grey50") +
+    scale_colour_manual(values = setNames(c("grey75", "#F39B7F", "#DC0000"), levels(s$category))) +
+    labs(title = paste0(ct, ": differential splicing (each point is a cluster)"),
+         x = "ΔPSI of largest-effect intron (Smg1i − DMSO)",
+         y = "-log10 adjusted p-value", colour = NULL) +
+    theme(legend.position = "bottom")
+  if (has_repel) {
+    p <- p + ggrepel::geom_text_repel(data = lab, aes(label = label), colour = "black",
+                                      size = 3, max.overlaps = 30, min.segment.length = 0)
+  } else {
+    p <- p + geom_text(data = lab, aes(label = label), colour = "black", size = 3,
+                       vjust = -0.7, check_overlap = TRUE)
+  }
+  print(p)
+
+  tab <- top_genes %>%
+    as.data.frame() %>%
+    transmute(Rank = rank, Gene = genes, Cluster = cluster, `Top Intron` = top_intron,
+              `p.adj` = fmt_p(padj), `ΔPSI (Smg1i − DMSO)` = round(max_dpsi, 3),
+              Direction = direction, `Sig Clusters in Gene` = n_clusters)
+
+  cat(as.character(
+    kable(tab, format = "html", caption = paste0(ct, ": top ", n_top, " genes")) %>%
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = TRUE,
+                    font_size = 12) %>%
+      column_spec(6, color = ifelse(tab$`ΔPSI (Smg1i − DMSO)` > 0, "#DC0000", "#3C5488")) %>%
+      scroll_box(height = "500px")
+  ))
+}
+```
+
+# Cross-Cell-Type Comparison
+
+## Overlap of Top Gene Lists
+
+```{r overlap, fig.width = 6, fig.height = 5}
+gene_sets <- lapply(top_tabs, function(t) unique(t$genes))
+ov <- outer(cell_types, cell_types,
+            Vectorize(function(a, b) length(intersect(gene_sets[[a]], gene_sets[[b]]))))
+dimnames(ov) <- list(cell_types, cell_types)
+
+as.data.frame(as.table(ov)) %>%
+  ggplot(aes(x = Var1, y = Var2, fill = Freq)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = Freq), size = 4.5) +
+  scale_fill_gradient(low = "#F7F7F7", high = "#4DBBD5") +
+  labs(title = paste0("Shared genes between top ", n_top, " lists"),
+       x = NULL, y = NULL, fill = "Genes") +
+  coord_equal()
+```
+
+```{r shared-counts}
+membership <- rbindlist(lapply(cell_types, function(ct)
+  data.table(gene = gene_sets[[ct]], cell_type = ct)))
+n_ct <- membership[, .(n_cell_types = .N, cell_types = paste(cell_type, collapse = ", ")), by = gene]
+
+n_ct[, .(genes = .N), by = n_cell_types][order(-n_cell_types)] %>%
+  kable(col.names = c("In Top List of N Cell Types", "Genes"),
+        caption = "How many cell types share each top gene") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Genes in the Top List of Two or More Cell Types
+
+ΔPSI values come from each gene's best cluster in that cell type, even where the gene did not make that cell type's top list. NA means the gene was not tested there.
+
+```{r shared-table}
+shared <- n_ct[n_cell_types >= 2]
+hm_genes <- head(shared[order(-n_cell_types)]$gene, 60)
+hm_h <- max(4, length(hm_genes) * 0.18)   # heatmap height for the next chunk
+
+if (nrow(shared) == 0) {
+  cat("No gene appears in more than one top list.")
+} else {
+  wide <- rbindlist(lapply(cell_types, function(ct)
+    all_genes[[ct]][genes %in% shared$gene, .(gene = genes, cell_type = ct, max_dpsi, padj)]))
+
+  shared_tab <- wide %>%
+    mutate(value = paste0(sprintf("%+.3f", max_dpsi), ifelse(padj < params$fdr, "*", ""))) %>%
+    select(gene, cell_type, value) %>%
+    pivot_wider(names_from = cell_type, values_from = value) %>%
+    left_join(as.data.frame(shared)[, c("gene", "n_cell_types", "cell_types")], by = "gene") %>%
+    arrange(desc(n_cell_types), gene) %>%
+    select(Gene = gene, `In Top List Of` = cell_types, any_of(cell_types))
+
+  kable(shared_tab, caption = "ΔPSI (Smg1i − DMSO); * marks p.adj below the FDR cutoff") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+    scroll_box(height = "450px")
+}
+```
+
+```{r shared-heatmap, fig.width = 7, fig.height = hm_h}
+if (nrow(shared) > 0) {
+  hm <- wide[gene %in% hm_genes]
+  ord <- hm[, .(m = mean(max_dpsi, na.rm = TRUE)), by = gene][order(m)]$gene
+
+  ggplot(hm, aes(x = factor(cell_type, levels = cell_types), y = factor(gene, levels = ord), fill = max_dpsi)) +
+    geom_tile(colour = "white") +
+    geom_point(data = hm[padj < params$fdr], shape = 16, size = 0.9, colour = "black") +
+    scale_fill_gradient2(low = "#3C5488", mid = "white", high = "#DC0000", midpoint = 0,
+                         limits = c(-1, 1) * max(abs(hm$max_dpsi), na.rm = TRUE)) +
+    labs(title = "Shared top genes (up to 60)", subtitle = "Dot: p.adj below FDR cutoff",
+         x = NULL, y = NULL, fill = "ΔPSI\nSmg1i − DMSO") +
+    theme(axis.text.y = element_text(size = 7))
+}
+```
+
+# Known NMD-Regulated Genes
+
+A quick check that the experiment behaves as expected. These genes are often reported to carry NMD-linked poison exons or other unproductive splicing, so several of them should show strong changes with Smg1i.
+
+```{r controls}
+ctrl <- rbindlist(lapply(cell_types, function(ct) rbindlist(lapply(params$control_genes, function(g) {
+  m <- all_genes[[ct]][grepl(paste0("(^|,)", g, "(,|$)"), genes)]
+  if (nrow(m) == 0) return(data.table(gene = g, cell_type = ct, value = "not tested"))
+  m <- m[1]
+  data.table(gene = g, cell_type = ct,
+             value = paste0(sprintf("%+.3f", m$max_dpsi), " (", fmt_p(m$padj), ")"))
+}))))
+
+ctrl %>%
+  pivot_wider(names_from = cell_type, values_from = value) %>%
+  rename(Gene = gene) %>%
+  kable(caption = "ΔPSI (Smg1i − DMSO) of each gene's best cluster, with adjusted p-value") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+# Session Info
+
+```{r session}
+sessionInfo()
+```
