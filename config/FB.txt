@@ -1,6 +1,6 @@
-/scratch/thakur.san/castaldi/proj/nmd/data/rnaseq/bam/PS_STC1505_7_FB001VSmg1i_S7_L001.markdup.sorted.bam	Smg1i
-/scratch/thakur.san/castaldi/proj/nmd/data/rnaseq/bam/PS_STC1505_3_FB027USmg1i_S3_L001.markdup.sorted.bam	Smg1i
-/scratch/thakur.san/castaldi/proj/nmd/data/rnaseq/bam/PS_STC1505_11_FB029TSmg1iClean_S11_L001.markdup.sorted.bam	Smg1i
-/scratch/thakur.san/castaldi/proj/nmd/data/rnaseq/bam/PS_STC1505_8_FB001VDMSO_S8_L001.markdup.sorted.bam	DMSO
-/scratch/thakur.san/castaldi/proj/nmd/data/rnaseq/bam/PS_STC1505_4_FB027UDMSO_S4_L001.markdup.sorted.bam	DMSO
-/scratch/thakur.san/castaldi/proj/nmd/data/rnaseq/bam/PS_STC1505_12_FB029TDMSOClean_S12_L001.markdup.sorted.bam 	DMSO
+/scratch/thakur.san/nmd-leafcutter/bams_2026.3.8/FB001V_Smg1i.markdup.sorted.bam	Smg1i	001V
+/scratch/thakur.san/nmd-leafcutter/bams_2026.3.8/FB027U_Smg1i.markdup.sorted.bam	Smg1i	027U
+/scratch/thakur.san/nmd-leafcutter/bams_2026.3.8/FB029T_Smg1i_clean.markdup.sorted.bam	Smg1i	029T
+/scratch/thakur.san/nmd-leafcutter/bams_2026.3.8/FB001V_DMSO.markdup.sorted.bam	DMSO	001V
+/scratch/thakur.san/nmd-leafcutter/bams_2026.3.8/FB027U_DMSO.markdup.sorted.bam	DMSO	027U
+/scratch/thakur.san/nmd-leafcutter/bams_2026.3.8/FB029T_DMSO_clean.markdup.sorted.bam	DMSO	029T

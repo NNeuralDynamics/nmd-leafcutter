@@ -4,12 +4,12 @@ ENV_NAME = splicing
 # create the conda environment
 .PHONY: environment
 environment:
-	conda env create -f splicing_quant.yaml
+	conda env create -f splicing_leafcutter.yaml
 
 # clone necessary repositories
 .PHONY: clone
 clone:
-	git@github.com:SanikaThakur/leafcutter.git
+	git clone git@github.com:SanikaThakur/leafcutter.git
 
 # install the R environment using renv
 .PHONY: install_renv
